@@ -1,0 +1,413 @@
+---
+title: "Quadratic Assignment Procedure with Multivariate Models"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{qap}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE, message = FALSE, warning = FALSE,
+  comment = "#>"
+)
+library(tidyperm)
+library(dplyr)
+library(tidygraph)
+library(ggraph)
+```
+
+# 0. Introduction
+
+
+The ```tidyperm``` package is designed to allow you to flexibly conduct network permutation tests when the constraints of your data exceed what ```asnipe```'s ```mrqap()``` or ```mrqap.dsp()``` functions currently allow. But how does it work? Below, we'll walk through an example case using the Pokemon Network, a network built from [this beautiful dataset from Kaggle](https://www.kaggle.com/datasets/rounakbanik/pokemon?resource=download). This network contains an edgelist linking every Pokemon, describing the amount of ```damage``` the ```from``` Pokemon will receive from the ```to``` Pokemon. This network assumes both Pokemon are at level 5, the ```to``` Pokemon uses a moderate attack (```power = 40```), and the attack reflects the ```to``` Pokemon's type (whichever type is strongest against the ```from``` Pokemon).
+
+(If you deeply want to know how I made this edgelist, you can read [**this other tutorial**](https://rpubs.com/timothyfraser/pokemon_matrix), but it's not mission critical to the rest of this vignette.)
+
+## 0.1 Packages
+
+First, let's load packages!
+
+```{r packages, eval = FALSE}
+library(tidyperm)
+library(dplyr)
+library(igraph)
+library(tidygraph)
+```
+
+## 0.2 Data Import
+
+First, let's import the ```pokemon``` ```tidygraph``` network object. Each edge shows a unique pair of Pokemon, where the ```weakness``` column shows the relative weakness by type, regardless of level, while ```damage``` shows the damage imparted from the ```to``` Pokemon to the ```from``` Pokemon, and ```turns``` shows the number of turns it takes to defeat them.
+
+```{r import}
+# Load in network
+data("pokemon")
+
+pokemon
+```
+
+## 0.3 Create Variables
+
+Surprisingly, the Pokemon Network is pretty handy as an example for network modeling. There are a variety of concepts we might want to investigate.
+
+For example: overall, which Pokemon tend to levy the most damage from a tackle?
+
+- Are rarer Pokemon (eg. those with a lower capture rate) more powerful?
+
+- Are legendary Pokemon more powerful?
+
+- Are dragon type more powerful?
+
+- Are some Pokemon just stacked with better overall stats from the get-go?
+
+To test these, hypotheses, we're going to create an outcome variable, calculating the average damage inflicted on recipient by each ```to``` Pokemon. To limit the size of the matrix, we'll zoom into the 151 starter Pokemon where ```generation = 1```.
+
+```{r format}
+pokemon <- pokemon %>%
+  # Zoom into just the first generation
+  filter(generation == 1) %>%
+    # Average damage inflicted on recipients by this Pokemon
+  mutate(damage_mean = centrality_degree(
+    weights = .E()$damage, loops = TRUE, mode = "in") / n()) %>%
+  # Also, assign node traits of attacking Pokemon to each edge
+  activate("edges") %>%
+  # Get node trait of the recipient.
+  mutate(base_total = .N()$base_total[to],
+         capture_rate = .N()$capture_rate[to],
+         dragon = .N()$dragon[to],
+         legendary = .N()$legendary[to]) %>%
+  activate("nodes")
+
+```
+
+# 1. Edgewise Modeling
+
+## 1.1 Helper Functions
+
+First, we need a function to extract variable names from our formula.
+
+```{r}
+
+formula = damage ~ base_total + capture_rate + dragon + legendary
+
+vars <- get_vars(formula)
+
+```
+
+Second, we need a function to retrieve an adjacency matrix.
+
+```{r}
+a <- get_adj(pokemon, vars, names = "name")
+```
+
+Third, optionally, we need a function that will format the dataset for modeling.
+
+```{r}
+
+# And it will work like a charm!
+d <- get_format(data = a, type = "edgewise")
+
+```
+
+
+Fourth, write a modeling function.
+
+```{r}
+# Whatever model or function you supply to myfunction will get run
+get_model = function(data, formula, myfunction = NULL){
+  if(is.null(myfunction)){print("Provide modeling function and formula."); stop()
+    }else{myfunction(formula, data) %>% return()}
+}
+
+m <- d %>%
+  as_tibble() %>%
+  get_model(formula, myfunction = lm)
+
+```
+
+Fifth, for edgewise DSP...
+
+```{r}
+vars <- get_vars(formula)
+ynames <- vars[1]
+xnames <- vars[-1]
+# Format the matrices
+d <- get_format(data = a, type = "edgewise")
+
+# Drop all observations that are na
+d <- d %>% na.omit()
+
+# Extract variables
+y <- d[,ynames] %>% as.matrix()
+x <- d[,xnames] %>% as.matrix()
+
+# Get number of observations
+nn <- nrow(y)
+
+# Add intercept
+x <- matrix(1, nrow = nn, ncol = 1, dimnames = list(NULL, "intercept")) %>%
+  cbind(., x %>% as.matrix())
+
+# Write a function to do QR decomposition on our matrix
+getfit = function(y,x, tol = 1e-7){
+fit <- list(qr(x, tol = tol), y); return(fit)
+}
+
+# Write a short functon to collect model traits
+format_fit = function(qr_output, form, stat = "beta"){
+  # Create a list to hold model traits
+  fit <- list()
+  # Fill in model traits
+  # Get formula
+  fit$formula <- form
+  # Get coefficients
+  fit$coefficients <- qr.coef(qr_output[[1]], qr_output[[2]])
+  # Get y-predicted
+  fit$fitted.values <- qr.fitted(qr_output[[1]], qr_output[[2]])
+  # Get residuals
+  fit$residuals <- qr.resid(qr_output[[1]], qr_output[[2]])
+  # Get rank (degrees of freedom used up by model)
+  fit$rank <- qr_output[[1]]$rank
+  # Get number of observations
+  fit$n <- length(qr_output[[2]])
+  # Get residual degrees of freedom
+  fit$df.residual <- fit$n - fit$rank
+
+  # We have two options, to use beta or a standardized test statistic
+  # DSP recommends standardized test statistics
+  # If using beta
+  
+  # If using beta, extract raw coefficients
+  if (stat == "beta") {
+    fit$stat <- fit$coefficients
+  } else 
+    # Otherwise if using t-values,
+    if (stat == "t") {
+      # Calculate them!
+      
+      # Calculate standard error
+      fit$se <- fit %>% with( # Take square root of variance to get standard error
+        sqrt(
+          # Get diagonal of inverted QR decomposition matrix
+          qr_output[[1]]$qr %>% chol2inv() %>% diag() *
+            # Multiply by...
+            # sum of squared residuals divided by degrees of residual freedom
+            sum(fit$residuals^2) / fit$df.residual) 
+      )
+      # Calculate Test-Statistic
+      fit$stat <- fit %>% with(coefficients / se)
+    }
+  
+  return(fit) 
+}
+```
+
+```{r}
+# Get QR decomposition
+obs <- getfit(y,x)
+# Format results
+fit_obs <- format_fit(obs, formula, stat = "t")
+
+# For however many reps you did permutations for,
+# make a matrix to contain the test statistics for each.
+reps <- 10
+stat_rand <- matrix(0, reps, nx)
+
+#lm(y ~ x[,-1])$coefficients
+#fit_obs$coefficients
+
+
+for(i in 1:nx){
+  
+  xcor <- getfit(x[,i], x[,-c(i) ])
+  # Get shape of residuals
+  x_residuals <- x[,i]
+  # Fill with residuals
+  x_residuals <- qr.resid(xcor[[1]], xcor[[2]])
+  
+  
+  # How to reshape a matrix back into adjacency matrix format.
+  nmatrix <- get_n(pokemon)
+  names <- get_names(pokemon, names = "name")
+  
+  # Reformat to matrix
+  x_residuals <- array(x_residuals, dim = c(nmatrix, nmatrix, 1),
+                       dimnames = list(names, names, colnames(x)[i]))
+  
+  for(j in 1:reps){
+    # Get random permutation of rownames/colnames
+    rands <- sample(x = 1:nmatrix, replace = FALSE)
+    
+    # Permute original matrix
+    #ahat <- a[rands, rands, ynames] %>% 
+    #  matrix(., nrow = nn, ncol = 1, dimnames = list(NULL, ynames))
+    # Permute residuals to match
+    xhat <- x
+    # Permute residuals
+    xhat[, i] <- x_residuals[rands, rands, ] %>% 
+      matrix(., nrow = nn, ncol = 1)
+    
+    # Get random fit
+    qr_rand <- getfit(y, xhat)
+    
+    fit_rand <- list()
+    fit_rand <- format_fit(qr_rand, formula, stat = "t")
+    
+    # Return statistic
+    stat_rand[j, i] <- fit_rand$stat[i]
+    
+  }
+}
+
+```
+
+
+```{r}
+get_p = function(fit_obs, stat_rand){
+  # Compare random statistics against observed statistics,
+  # one-tailed: is the random stat greater than or equal to the observed?
+  fit_obs$P.greater <- sweep(stat_rand, 2, fit_obs$stat, ">=") %>%
+    # Now for each row, please get the mean (how often, out of total, is it TRUE?)
+    apply(., 2, mean)
+  # one-tailed: is the random stat less than or equal to the observed?
+  fit_obs$P.lesser <- sweep(stat_rand, 2, fit_obs$stat, "<=") %>%
+    apply(., 2, mean)
+  # two-tailed: is the absolute value of random stat less than or equal to the absolute value of the observed?
+  fit_obs$P.values <- sweep(abs(stat_rand), 2, abs(fit_obs$stat), ">=") %>%
+    apply(., 2, mean)
+  # Name
+  names(fit_obs$P.values) <- c("(Intercept)", xnames)
+  # Label
+  class(fit_obs) <- "mrqap.dsp"
+  # Return values
+  return(fit_obs)
+}
+
+
+# Write a short function to calculate aic
+get_aic = function(qr_output){
+  q <- qr_output[[1]]$qr %>% diag() %>% prod() %>% abs() %>%  log()
+  # Get number of predictors (minus intercept)
+  predictors <- qr_output[[1]]$rank-1
+  # Get number of observations in x (rows)
+  obs <- qr_output[[1]]$qr %>% nrow()
+  aic <- predictors - q * obs
+  return(aic)
+}
+
+fit_obs$AIC <- get_aic(obs)
+
+```
+
+
+```{r}
+
+# Get number of columns in x
+nx <- dim(x)[2]
+
+if (nx == 1) {stop("x must contain more than one predictor variable")}
+
+# Run QR Decomposition (least squares regression)
+obs <- getfit(y, x)
+
+qr.coef(obs[[1]], obs[[2]])
+```
+
+```{r}
+
+format_fit(get_fit_obs, formula)
+lm(y ~ x)$residual
+qr.coef(get_fit_obs[[1]], get_fit_obs[[2]])
+qr.resid(fit_obs[[1]], )
+```
+
+
+
+## 1.1 Get Dataset
+
+```{r}
+# Get number of nodes
+vars <- get_vars(formula)
+
+ynames <- vars[1]
+xnames <- vars[-1]
+
+```
+
+
+Let's build a flow of functions, each building sequentially on each other, and interchangeable.
+
+```{r}
+
+
+
+
+```
+
+- get adjacency matrix
+
+- convert
+
+- model
+
+
+
+
+## 1.2 Get Observed Model
+
+```{r}
+
+
+```
+
+
+
+# 1. Modeling on Networks
+
+We can very quickly produce an ordinary least squares model ```m``` estimating the effect of each covariate on ```damage_mean```, using the ```lm()``` function. 
+
+```{r model}
+m <- pokemon %>%
+  # Extract nodes and convert to tibble
+  activate("nodes") %>% as_tibble() %>%
+  # Model dataframe!
+  lm(formula = damage_mean ~ base_total + capture_rate + legendary + dragon)
+
+# See our coefficients
+m$coefficients
+```
+
+But by definition, our nodes are interrelated, meaning they violate the "independence of observations" assumption required for calculating coefficient standard errors. This causes our standard errors to skew, for p-values to appear more statistically significant than they really are. This hinders our ability to find out real associations in our data!
+
+We need a better way to capture what this dataset really would look like due to chance.
+
+```tidyperm``` provides 5 options:
+
+- ```qap```
+
+- ```qap.dsp```
+
+- ```jackknife```
+
+- ```bootstrapp```
+
+- ```simulation```
+
+
+# 2. QAP-DSP
+
+```{r}
+
+
+```
+
+
+
+
+
+
+
+
+
+

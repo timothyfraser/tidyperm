@@ -1,0 +1,87 @@
+---
+title: "Building a Tidygraph Object"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{building_tidygraph_object}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  comment = "#>"
+)
+```
+```{r setup, include = FALSE}
+library(tidyperm)
+library(dplyr)
+```
+
+# 0. Tidygraph Objects
+
+Several ```tidyperm``` function examples use the ```pokemon``` network to as a usage case. This network file is formatted as a ```tidygraph``` object. ```tidygraph``` is an excellent package enabling tidy formatting of edgelists and nodes, easy to use various ```tidyverse``` functions with. For more information, see their website [here](https://tidygraph.data-imaginist.com/)!
+
+But how do we make a ```tidygraph``` object? This vignette summarizes how!
+
+# 1. Packages
+
+First, load the following packages.
+
+```{r}
+library(readr) # for reading in data
+library(dplyr) # for using pipelines, glimpse(), etc.
+library(tidygraph) # for creating, reading, and using tidygraph objects
+```
+
+# 2. Importing Edge & Node Data
+
+First, let's import the edgelist, which we will name ```edges```. Each edge shows a unique pair of Pokemon, where the ```weakness``` column shows the relative weakness by type, regardless of level, while ```damage``` shows the damage imparted from the ```to``` Pokemon to the ```from``` Pokemon, and ```turns``` shows the number of turns it takes to defeat them.
+
+We can access our data using the ```data()``` command.
+
+```{r}
+# Load in edges data
+data("edges")
+# Import nodes
+data("nodes")
+# Import pokemon network
+data("pokemon")
+```
+
+When using your own data, simply use ```read_csv()``` from the ```readr``` package like so: ```df <- read_csv("mydata.csv")```
+
+Let's take a peek at our raw datasets!
+
+```{r}
+# Let's use glimpse to view the contents of each variable
+edges %>% glimpse()
+```
+
+```{r}
+# Let's use glimpse to view the contents of each variable
+nodes %>% glimpse()
+```
+
+
+## 3. Build Tidygraph
+
+Next, let's import and build our network. Saved in ```edges``` is an edgelist of all observed dyadic relationships between our Pokemon. Let's convert this into a ```tidgraph``` network dataset.
+
+```{r, eval = FALSE}
+# Import network as a directed network, with the name column being the unique ID
+tbl_graph(nodes = nodes, edges = edges, directed = TRUE, node_key = "name")
+```
+
+```{r, echo = FALSE}
+pokemon
+```
+
+This is the exact same as what we find in the ```pokemon``` object.
+
+```{r}
+# remove extraneous data
+rm(list= ls())
+```

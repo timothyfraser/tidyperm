@@ -1,4 +1,5 @@
 .Rproj.user
-.Rhistory
-.RData
-.Ruserdata
+tidyperm.Rcheck/
+tidyperm*.tar.gz
+tidyperm*.tgz
+inst/doc
